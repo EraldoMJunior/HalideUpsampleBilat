@@ -10,8 +10,11 @@
 
 // Include some support code for loading pngs.
 #include "halide_image_io.h"
-
 #include "bilateral_upsample.h"
+#include <chrono>
+
+
+
 using namespace Halide::Tools;
 using namespace Halide;
 
@@ -103,7 +106,14 @@ void  upsample_halide_run(const char* filename  , const char* secundary  )
     int width = input.width();
     int height = input.height();
     Halide::Runtime::Buffer<uint8_t> output(width, height );
-    bilateral_upsample( input , g_sec , k,    output  );
+
+    for(int loop = 0 ; loop < 3 ; loop++){
+       auto t_start  = std::chrono::high_resolution_clock::now();
+       bilateral_upsample( input , g_sec , k, output   );
+         auto t_end  = std::chrono::high_resolution_clock::now();
+            std::cout << "Time taken: " << std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count() << " ms" << std::endl;
+    }
+
     save_image(output, "output.png");
 
     return ;
@@ -200,6 +210,19 @@ int main(int argc, char** argv) {
     std::cout << "Calculating filtered images... Done.     " << std::endl;
 
     cv::Mat disp = cv::imread(argv[2], cv::IMREAD_GRAYSCALE);
+
+    //check if disp is 8x smaller than image
+    if (disp.size().height * 8 != image.size().height || disp.size().width * 8 != image.size().width) {
+//dump sizes
+       std::cout << "image size " << image.size().height << " " << image.size().width << std::endl;
+         std::cout << "disp size " << disp.size().height << " " << disp.size().width << std::endl;
+
+         std::cout<< "Please resize to " << image.size().height / 8 << " " << image.size().width / 8 << std::endl;
+
+        std::cerr << "Error: Depth image must be 8x smaller than RGB image." << std::endl;
+
+        return 1;
+    }
 
     upsample_halide_run(  argv[1] ,  argv[2] );
 
