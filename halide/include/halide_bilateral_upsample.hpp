@@ -1,6 +1,6 @@
 
 #include "Halide.h"
-
+#include <assert.h>
 
 namespace {
 
@@ -24,12 +24,13 @@ public:
     Input<Func >  rgb{"rgb", UInt(8),  3};
     Input<Func >  mask{"mask",UInt(8),  2};
     Input<Func > k{"k", 2};
-    Output<Func> output{"output", UInt(8), 2};
 
+    Output<Func> output{"output", UInt(8), 2};
 
     Var x{"x"};
     Var xi{"xi"}, xo{"xo"};
     Var  y{"y"};
+    Var z{"z"};
     Var dx{"dx"};
     Var dy{"dy"};
     Var c{ "c" };
@@ -37,6 +38,7 @@ public:
     Func normalize_bilateral{ "normalize_bilateral"};
     Func sum_bilateral { "sum_bilateral"};
 
+    Func gaussian_func{"gaussian_func"};
 
     // Defines outputs using inputs
     void generate() {
@@ -46,14 +48,14 @@ public:
     Func bilateral("bilateral");
 
 
-
-    RDom r(-4, 9, -4, 9);
+   // RDom r(-4, 9, -4, 9);
+    RDom r(-3, 7, -3, 7);
 
     Expr dist_r = Halide::ConciseCasts::f32(Halide::ConciseCasts::i32(rgb(x, y, 0)) - Halide::ConciseCasts::i32(rgb((x + dx), (y + dy), 0)));
     Expr dist_g = Halide::ConciseCasts::f32(Halide::ConciseCasts::i32(rgb(x, y, 1)) - Halide::ConciseCasts::i32(rgb((x + dx), (y + dy), 1)));
     Expr dist_b = Halide::ConciseCasts::f32(Halide::ConciseCasts::i32(rgb(x, y, 2)) - Halide::ConciseCasts::i32(rgb((x + dx), (y + dy), 2)));
 
-     Expr dist =  (dist_r * dist_r +  dist_g * dist_g + dist_b*dist_b) / 3.f;
+     Expr dist =  (dist_r * dist_r  +  dist_g * dist_g + dist_b*dist_b) / 3.f;
      // Func gray_scale;
      //gray_scale(x,y) =  u8_sat(rgb(x,y,0)/3 + rgb(x,y,1)/3 + rgb(x,y,2) /3)  ;
     // Expr dist = Halide::ConciseCasts::f32(gray_scale(x,y) - gray_scale((x + dx), (y + dy)))   ;
@@ -61,21 +63,26 @@ public:
     //float sig2 = 100.f;                 // 2 * sigma ^ 2
     float sigma_r = 10;
 
+     Expr score = (  (dist ) / (2 * sigma_r * sigma_r ))  ;
+     gaussian_func(z) =  1.0f/(z * z + 1.0f);
+     weights(dx, dy, x, y ) = gaussian_func( Halide::ConciseCasts::i32(score)  ) * k(dx, dy) ;
+
     // score represents the weight contribution due to intensity difference
-    weights(dx, dy, x, y ) = exp(-(  (dist ) / (2 * sigma_r * sigma_r ))) * k(dx, dy) ;
+    // weights(dx, dy, x, y ) = exp( -(  (dist ) / (2 * sigma_r * sigma_r ))  ) * k(dx, dy) ;
+
 
     normalize_bilateral(x, y) = 0.0f ;
     sum_bilateral(x, y) = 0.0f ;
 
     normalize_bilateral(x, y) +=  (  weights(r.x, r.y, x, y )) ;
-      sum_bilateral(x, y) +=      (  weights(r.x, r.y, x, y ) * mask((x + r.x)/( 2 ), (y + r.y)/( 2 ) )  ) ;
+    sum_bilateral(x, y) +=      (  weights(r.x, r.y, x, y ) * mask((x + r.x)/( 2 ), (y + r.y)/( 2 ) )  ) ;
 
     // output normalizes weights to total weights
 
     //bilateral(x, y ) = sum(mask((x + r.x)/( 2 ), (y + r.y)/( 2 ) )  * weights(r.x, r.y, x, y )) / total_weights(x, y );
 
     bilateral(x, y ) = sum_bilateral(x, y ) / normalize_bilateral(x, y ) ;
-    output(x, y ) =  Halide::ConciseCasts::u8_sat(bilateral(x, y ) ) ;
+    output(x, y ) =  Halide::ConciseCasts::u8_sat(  bilateral(   x ,   y ) ) ;
 
 
     }
@@ -89,7 +96,9 @@ public:
         sum_bilateral.compute_root();
         sum_bilateral.update(0).split(x, xo, xi, 16).vectorize(xi);
 
-        output.compute_root().parallel(y).vectorize(x, 16);
+       // sum_bilateral.compute_with(normalize_bilateral, xo);
+
+        output.compute_root().vectorize(x, 16);
 
     }
 };
@@ -106,6 +115,10 @@ class BilateralUpsample : public Generator<BilateralUpsample>{
         Input<Buffer<uint8_t>>  rgb{"rgb",  3};
         Input<Buffer<uint8_t>>  mask{"mask", 2};
         Input<Buffer<float>> k{"k", 2};
+
+        Input<int > org_x{"org_x" };
+        Input<int > org_y{"org_y" };
+
         Output<Func> output{"output", UInt(8), 2};
 
 
@@ -122,18 +135,25 @@ class BilateralUpsample : public Generator<BilateralUpsample>{
             upsample_2 = create<BilateralUpsampleStep>();
             upsample_3 = create<BilateralUpsampleStep>();
 
-            down_sample_2(x,y,c) = (rgb_mirror(2*x, 2*y, c)/4 + rgb_mirror(2*x+1, 2*y, c)/4 + rgb_mirror(2*x, 2*y+1, c)/4 + rgb_mirror(2*x+1, 2*y+1, c)/4);
+            Func rgb_mirror_slice{ "rgb_mirror_slice" };
+            Func mask_mirror_slice{ "mask_mirror_slice" };
+
+            rgb_mirror_slice(x,y,c) = rgb_mirror(org_x + x,org_y + y,c);
+            mask_mirror_slice(x,y) = mask_mirror(org_x /8 +   x, org_y /8 +  y);
+
+            down_sample_2(x,y,c) = (rgb_mirror_slice(2*x, 2*y, c)/4 + rgb_mirror_slice(2*x+1, 2*y, c)/4 + rgb_mirror_slice(2*x, 2*y+1, c)/4 + rgb_mirror_slice(2*x+1, 2*y+1, c)/4);
 
             down_sample_4(x,y,c) = (down_sample_2(2*x, 2*y, c)/4 + down_sample_2(2*x+1, 2*y, c)/4 + down_sample_2(2*x, 2*y+1, c)/4 + down_sample_2(2*x+1, 2*y+1, c)/4);
 
-            upsample_3->apply(down_sample_4, mask_mirror ,  k );
-            upsample_2->apply(down_sample_2,  upsample_3->output  , k  );
-            upsample_1->apply(rgb_mirror, upsample_2->output , k  );
+            upsample_3->apply(down_sample_4, mask_mirror_slice ,  k   );
+            upsample_2->apply(down_sample_2,  upsample_3->output  , k    );
+            upsample_1->apply(rgb_mirror_slice, upsample_2->output , k    );
             bilateral_output(x, y ) =   upsample_1->output(x,y);
 
             Expr px = 15*(bilateral_output(x, y ) / 255.0f - 0.5f);
-            Expr sig = 255.0f / (1.0f + exp(-px));
-            output(x, y ) = u8_sat(sig);
+           Expr sig = 255.0f / (1.0f + exp(-px));
+           output(x, y ) = u8_sat(sig);
+
 
          }
 
