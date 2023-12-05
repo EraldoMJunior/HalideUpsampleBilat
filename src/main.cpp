@@ -1,6 +1,7 @@
 #include <opencv2/opencv.hpp>
 #include <iostream>
 #include <sstream>
+#include <algorithm>
 
 
 // The only Halide header file you need is Halide.h. It includes all of Halide.
@@ -12,6 +13,7 @@
 #include "halide_image_io.h"
 #include "bilateral_upsample.h"
 #include <chrono>
+#include <omp.h>
 
 
 
@@ -82,7 +84,13 @@ cv::Mat create_gaussian_filter(int sigma) {
 
 
 
-
+int  has_inter_pixel(Halide::Runtime::Buffer<uint8_t> &g_sec, int x, int y, int tile_size ){
+   for(int yi = y   ; yi <= y + tile_size ; yi++)
+    for(int xi = x   ; xi <= x + tile_size ; xi++)
+            if((g_sec(xi,yi) > 50) && (g_sec(xi,yi) < 205))  return 1;
+    if (g_sec(x+tile_size/2,y+tile_size/2) >= 205 ) return 2;
+    return 0;
+}
 
 
 
@@ -90,7 +98,7 @@ cv::Mat create_gaussian_filter(int sigma) {
  //int bilateral_upsample(struct halide_buffer_t *_rgb_buffer, struct halide_buffer_t *_mask_buffer, struct halide_buffer_t *_output_buffer);
 void  upsample_halide_run(const char* filename  , const char* secundary  )
 {
-    int sig_s = 4;
+    int sig_s = 3;
     Halide::Runtime::Buffer<float> k(2*sig_s + 1, 2*sig_s + 1 );
     k.translate({-sig_s, -sig_s});
     k.fill(0.f);
@@ -105,16 +113,64 @@ void  upsample_halide_run(const char* filename  , const char* secundary  )
     Halide::Runtime::Buffer<uint8_t> g_sec = load_image(secundary);
     int width = input.width();
     int height = input.height();
-    Halide::Runtime::Buffer<uint8_t> output(width, height );
+    Halide::Runtime::Buffer<uint8_t> output(128, 128 );
+
+    cv::Mat output_cv_image[4] ;
+
+    output_cv_image[0]= cv::Mat(128, 128, CV_8UC1);
+    output_cv_image[1]= cv::Mat(128, 128, CV_8UC1);
+    output_cv_image[2]= cv::Mat(128, 128, CV_8UC1);
+    output_cv_image[3]= cv::Mat(128, 128, CV_8UC1);
+
+    cv::Mat output_cv_full_image(height, width, CV_8UC1);
+
+
+    Halide::Runtime::Buffer<uint8_t> output_tmp[4] ;
+    output_tmp[0] = Halide::Runtime::Buffer<uint8_t>(output_cv_image[0].data , 128, 128 );
+    output_tmp[1] = Halide::Runtime::Buffer<uint8_t>(output_cv_image[1].data , 128, 128 );
+    output_tmp[2] = Halide::Runtime::Buffer<uint8_t>(output_cv_image[2].data , 128, 128 );
+    output_tmp[3] = Halide::Runtime::Buffer<uint8_t>(output_cv_image[3].data , 128, 128 );
+
+
+
+
+
+auto t_start  = std::chrono::high_resolution_clock::now();
+#pragma omp parallel for collapse(2) schedule(dynamic) num_threads(4)
+     for(int yi = 0 ; yi <  height ; yi+= 128 )
+       for(int xi = 0 ; xi <  width ; xi+= 128 )
+        {
+            yi = std::min(yi, height - 128);
+            xi = std::min(xi, width - 128);
+            int pixel_kind = has_inter_pixel(g_sec, xi / 8, yi / 8, 128/8);
+            if (pixel_kind == 0)  continue;
+            if (pixel_kind == 2)  {
+                output_cv_full_image(cv::Rect(xi,yi,128,128)).setTo( cv::Scalar(255));
+                continue;
+            }
+
+            //has any pixel != 0 or
+            int ithread = omp_get_thread_num();
+            bilateral_upsample( input , g_sec , k, xi, yi, output_tmp[ ithread ]   );
+            output_cv_image[ ithread ].copyTo(output_cv_full_image(cv::Rect(xi,yi,128,128)));
+
+        }
+       auto t_end  = std::chrono::high_resolution_clock::now();
+       std::cout << "Time taken: " << std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count() << " ms" << std::endl;
+
+        imwrite("output.png", output_cv_full_image);
+
+
+
 
     for(int loop = 0 ; loop < 3 ; loop++){
-       auto t_start  = std::chrono::high_resolution_clock::now();
-       bilateral_upsample( input , g_sec , k, output   );
-         auto t_end  = std::chrono::high_resolution_clock::now();
-            std::cout << "Time taken: " << std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count() << " ms" << std::endl;
+      // auto t_start  = std::chrono::high_resolution_clock::now();
+      // bilateral_upsample( input , g_sec , k, 900, 1800, output   );
+      // auto t_end  = std::chrono::high_resolution_clock::now();
+      // std::cout << "Time taken: " << std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count() << " ms" << std::endl;
     }
 
-    save_image(output, "output.png");
+
 
     return ;
 }
@@ -212,12 +268,12 @@ int main(int argc, char** argv) {
     cv::Mat disp = cv::imread(argv[2], cv::IMREAD_GRAYSCALE);
 
     //check if disp is 8x smaller than image
-    if (disp.size().height * 8 != image.size().height || disp.size().width * 8 != image.size().width) {
+    if (disp.size().height   != image.size().height/8 || disp.size().width   != image.size().width/8) {
 //dump sizes
        std::cout << "image size " << image.size().height << " " << image.size().width << std::endl;
          std::cout << "disp size " << disp.size().height << " " << disp.size().width << std::endl;
 
-         std::cout<< "Please resize to " << image.size().height / 8 << " " << image.size().width / 8 << std::endl;
+         std::cout<< "Please resize to " << image.size().width / 8 << " " << image.size().height / 8 << std::endl;
 
         std::cerr << "Error: Depth image must be 8x smaller than RGB image." << std::endl;
 
