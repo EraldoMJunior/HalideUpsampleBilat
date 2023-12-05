@@ -9,6 +9,7 @@ include(ExternalProject)
 ###############
 
 find_package( OpenCV REQUIRED )
+
 include_directories( ${OpenCV_INCLUDE_DIRS} )
 
 #c++17
@@ -172,5 +173,7 @@ ENDIF()
 
 
 if(OpenMP_CXX_FOUND)
+    #add flags
+    target_compile_options(${TARGET} PUBLIC ${OpenMP_CXX_FLAGS})
     target_link_libraries(${TARGET}  OpenMP::OpenMP_CXX  Halide  ${OpenCV_LIBS} ${PTHREAD_LIB} dl)
 endif()
